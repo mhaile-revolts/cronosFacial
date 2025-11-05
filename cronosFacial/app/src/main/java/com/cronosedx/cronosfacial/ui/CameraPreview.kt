@@ -18,7 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -38,6 +38,11 @@ data class FaceSessionData(
     val engagement: EngagementState
 )
 
+/**
+ * Camera preview composable with real CameraX integration.
+ * 
+ * Displays live camera feed and performs facial analysis when tracking is enabled.
+ */
 @Composable
 fun CameraPreview(
     modifier: Modifier = Modifier,
@@ -48,50 +53,53 @@ fun CameraPreview(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    val handler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
-    val isRunning = remember { mutableStateOf(false) }
+    val previewView = remember { PreviewView(context) }
+    
+    // Track whether camera is started
+    val isCameraStarted = remember { mutableStateOf(false) }
 
-    DisposableEffect(isTracking) {
-        if (isTracking && !isRunning.value) {
-            isRunning.value = true
-            val runnable = object : Runnable {
-                override fun run() {
-                    if (isRunning.value) {
-                        val bitmap = Bitmap.createBitmap(640, 480, Bitmap.Config.ARGB_8888)
-                        processImage(bitmap, context, onFaceData, onEngagement)
-                        bitmap.recycle()
-                        handler.postDelayed(this, 500) // 500ms interval
-                    }
-                }
-            }
-            handler.post(runnable)
-        } else if (!isTracking && isRunning.value) {
-            isRunning.value = false
-            handler.removeCallbacksAndMessages(null)
+    DisposableEffect(lifecycleOwner, isTracking) {
+        if (!isCameraStarted.value) {
+            startCamera(
+                context = context,
+                previewView = previewView,
+                lifecycleOwner = lifecycleOwner,
+                cameraExecutor = cameraExecutor,
+                isTracking = isTracking,
+                onFaceData = onFaceData,
+                onEngagement = onEngagement
+            )
+            isCameraStarted.value = true
         }
+        
         onDispose {
-            isRunning.value = false
-            handler.removeCallbacksAndMessages(null)
             cameraExecutor.shutdown()
         }
     }
 
     Box(modifier = modifier) {
+        // Display actual camera preview
+        AndroidView(
+            factory = { previewView },
+            modifier = Modifier.fillMaxSize()
+        )
+        
+        // Overlay tracking status
         if (isTracking) {
-            // Show a placeholder or camera preview if needed
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
             ) {
-                Text("Simulated Camera Preview - Tracking...")
-            }
-        } else {
-            // Show placeholder when not tracking
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Camera Preview - Click 'Start Tracking' to begin")
+                // Draw tracking indicator (green circle in top-right)
+                drawCircle(
+                    color = Color.Green,
+                    radius = 20f,
+                    center = androidx.compose.ui.geometry.Offset(
+                        size.width - 40f,
+                        40f
+                    )
+                )
             }
         }
     }

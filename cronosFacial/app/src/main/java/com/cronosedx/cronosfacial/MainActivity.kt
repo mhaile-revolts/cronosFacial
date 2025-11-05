@@ -10,36 +10,35 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
 import com.cronosedx.cronosfacial.ui.CameraPreview
 import com.cronosedx.cronosfacial.ui.theme.CronosFacialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.material3.Button
 import androidx.compose.ui.unit.dp
-import com.cronosedx.cronosfacial.ui.FaceSessionData
-import com.cronosedx.cronosfacial.network.RetrofitInstance
-import com.cronosedx.cronosfacial.network.AiMlService
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.LaunchedEffect
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
-import com.cronosedx.cronosfacial.model.EngagementState
-import com.cronosedx.cronosfacial.network.EngagementData
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.cronosedx.cronosfacial.viewmodel.MainViewModel
+import dagger.hilt.android.AndroidEntryPoint
 
+/**
+ * Main activity for the Cronos Facial Recognition app.
+ * 
+ * Handles camera permissions and displays the main screen with facial tracking.
+ */
+@AndroidEntryPoint
 class MainActivity : ComponentActivity() {
-    private val aiMlService = AiMlService()
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,36 +56,40 @@ class MainActivity : ComponentActivity() {
             CronosFacialTheme {
                 MainScreen(
                     cameraPermissionGrantedState = cameraPermissionGrantedState.value,
-                    onRequestCameraPermission = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
-                    aiMlService = aiMlService
+                    onRequestCameraPermission = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) }
                 )
             }
         }
     }
 }
 
+/**
+ * Main screen composable.
+ * 
+ * Displays the camera preview, tracking controls, and current analysis results.
+ */
 @Composable
 fun MainScreen(
     cameraPermissionGrantedState: Boolean,
     onRequestCameraPermission: () -> Unit,
-    aiMlService: AiMlService
+    viewModel: MainViewModel = hiltViewModel()
 ) {
-    val isTracking = remember { mutableStateOf(false) }
-    val sessionData = remember { mutableStateOf<List<FaceSessionData>>(emptyList()) }
-    val engagementStates = remember { mutableStateOf<List<Pair<Long, EngagementState>>>(emptyList()) }
-    val latestEngagement = engagementStates.value.lastOrNull()?.second ?: EngagementState.Unknown
-    val latestEmotion = remember { mutableStateOf("Neutral") }
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = androidx.compose.ui.platform.LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
 
-    LaunchedEffect(Unit) {
-        val granted = ContextCompat.checkSelfPermission(
-            context, Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
-        if (granted != cameraPermissionGrantedState) {
-            // Update state if system permission and state are out of sync
-            onRequestCameraPermission()
+    // Show snackbar messages
+    LaunchedEffect(uiState.message) {
+        uiState.message?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearMessage()
+        }
+    }
+    
+    LaunchedEffect(uiState.error) {
+        uiState.error?.let {
+            snackbarHostState.showSnackbar("Error: $it")
+            viewModel.clearError()
         }
     }
 
@@ -105,118 +108,41 @@ fun MainScreen(
                         onRequestCameraPermission()
                         return@Button
                     }
-                    if (!isTracking.value) {
-                        // Starting new session: clear previous data and start AI/ML session
-                        sessionData.value = emptyList()
-                        engagementStates.value = emptyList()
-                        latestEmotion.value = "Neutral"
-                        aiMlService.startSession()
-                    } else {
-                        // Stopping session: submit data to both legacy API and AI/ML backend
-                        coroutineScope.launch {
-                            try {
-                                // Submit to legacy API
-                                val dataToSend = sessionData.value
-                                val engagementToSend = engagementStates.value.map { EngagementData(it.first, it.second.name) }
-                                val response = RetrofitInstance.api.submitFaceSession(dataToSend)
-                                val engagementResponse = RetrofitInstance.api.submitEngagement(engagementToSend)
-                                
-                                // Submit to AI/ML backend
-                                val aiMlResult = aiMlService.endSession()
-                                
-                                if (response.isSuccessful && engagementResponse.isSuccessful) {
-                                    val message = if (aiMlResult != null) {
-                                        "Session data submitted successfully! AI analysis: ${aiMlResult.sessionInsights.averageEngagement}% engagement"
-                                    } else {
-                                        "Session data submitted successfully!"
-                                    }
-                                    snackbarHostState.showSnackbar(message)
-                                } else {
-                                    snackbarHostState.showSnackbar("Failed to submit session data.")
-                                }
-                            } catch (e: Exception) {
-                                snackbarHostState.showSnackbar("Network error: ${e.localizedMessage}")
-                            }
-                        }
-                    }
-                    isTracking.value = !isTracking.value
+                    viewModel.toggleTracking()
                 },
                 modifier = Modifier.padding(16.dp),
-                enabled = cameraPermissionGrantedState || !isTracking.value
+                enabled = (cameraPermissionGrantedState || !uiState.isTracking) && !uiState.isLoading
             ) {
-                Text(if (isTracking.value) "Stop Tracking" else "Start Tracking")
+                Text(if (uiState.isTracking) "Stop Tracking" else "Start Tracking")
             }
             
             // Display current emotion and engagement
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "Emotion: ${latestEmotion.value}",
+                    text = "Emotion: ${uiState.latestEmotion}",
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
                 Text(
-                    text = "Engagement: $latestEngagement",
+                    text = "Engagement: ${uiState.latestEngagement}",
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
+                if (uiState.isLoading) {
+                    Text(
+                        text = "Submitting data...",
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                }
             }
             
             Box(modifier = Modifier.weight(1f)) {
                 CameraPreview(
                     modifier = Modifier.fillMaxSize(),
-                    isTracking = isTracking.value && cameraPermissionGrantedState,
-                    onFaceData = { data ->
-                        if (isTracking.value) {
-                            sessionData.value = sessionData.value + data
-                            latestEmotion.value = data.emotion
-                            
-                            // Send to AI/ML backend in real-time
-                            coroutineScope.launch {
-                                try {
-                                    // Convert FaceSessionData to FacialLandmark format
-                                    val landmarks = listOf(
-                                        com.cronosedx.cronosfacial.network.FacialLandmark(
-                                            x = 0.5f, y = 0.5f, z = 0.0f,
-                                            confidence = 0.8f,
-                                            landmarkType = "face_center"
-                                        )
-                                    )
-                                    
-                                    aiMlService.streamFacialData(
-                                        landmarks = landmarks,
-                                        emotion = data.emotion,
-                                        gaze = data.gaze,
-                                        engagement = data.engagement,
-                                        confidence = 0.8f
-                                    )
-                                } catch (e: Exception) {
-                                    // Log error but don't crash the app
-                                    android.util.Log.e("MainActivity", "Error streaming to AI/ML", e)
-                                }
-                            }
-                        }
-                    },
-                    onEngagement = { engagement ->
-                        if (isTracking.value) {
-                            engagementStates.value = engagementStates.value + (System.currentTimeMillis() to engagement)
-                        }
-                    }
+                    isTracking = uiState.isTracking && cameraPermissionGrantedState,
+                    onFaceData = viewModel::onFaceData,
+                    onEngagement = viewModel::onEngagement
                 )
             }
         }
     }
 }
 
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
-}
-
-@Preview(showBackground = true)
-@Composable
-fun GreetingPreview() {
-    CronosFacialTheme {
-        Greeting("Android")
-    }
-}
